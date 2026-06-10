@@ -1,0 +1,845 @@
+Prompt:
+Hey! I need to build a terminal-based 2D Graphics Editor in C. The canvas should be a 2D character grid of size 60x20. I want it filled with '_' at first, and then I want to draw shapes on it using '*'.
+
+I need it to support lines, rectangles, circles, and triangles. I also want to be able to add new shapes, list active shapes, modify existing shapes, or delete them by ID.
+
+For the interface, could you make a standard command-line menu first? And then, also add an interactive colored split-screen mode using ncurses (with a canvas on the left, a sidebar for the shapes, and a status bar at the bottom) that I can enable with a compiler flag like USE_NCURSES.
+
+Response:
+Here is the complete implementation of the 2D Graphics Editor in C supporting both a CLI mode and an interactive ncurses split-screen mode.
+
+```c
+#include <stdio.h>
+#include <stdlib.h>
+
+#define WIDTH 60
+#define HEIGHT 20
+#define MAX_SHAPES 100
+
+/* =========================================================================
+ * 1. DATA STRUCTURES & DEFINITIONS
+ * ========================================================================= */
+
+typedef enum {
+    SHAPE_LINE,
+    SHAPE_RECTANGLE,
+    SHAPE_CIRCLE,
+    SHAPE_TRIANGLE
+} ShapeType;
+
+typedef struct {
+    int x1, y1;
+    int x2, y2;
+} LineData;
+
+typedef struct {
+    int x, y;      /* Top-left corner coordinate */
+    int w, h;      /* Width and height */
+} RectData;
+
+typedef struct {
+    int cx, cy;    /* Center coordinate */
+    int r;         /* Radius */
+} CircleData;
+
+typedef struct {
+    int x1, y1;
+    int x2, y2;
+    int x3, y3;
+} TriangleData;
+
+typedef struct {
+    int id;
+    ShapeType type;
+    union {
+        LineData line;
+        RectData rect;
+        CircleData circle;
+        TriangleData tri;
+    } data;
+} Shape;
+
+/* =========================================================================
+ * 2. GEOMETRY ENGINE & LIST MANAGEMENT (COMMON)
+ * ========================================================================= */
+
+/* Clear canvas with underscores */
+void canvas_clear(char canvas[HEIGHT][WIDTH]) {
+    for (int y = 0; y < HEIGHT; y++) {
+        for (int x = 0; x < WIDTH; x++) {
+            canvas[y][x] = '_';
+        }
+    }
+}
+
+/* Print canvas to stdout */
+void canvas_display(char canvas[HEIGHT][WIDTH]) {
+    for (int y = 0; y < HEIGHT; y++) {
+        for (int x = 0; x < WIDTH; x++) {
+            putchar(canvas[y][x]);
+        }
+        putchar('\n');
+    }
+}
+
+/* Safely plot a single pixel on the canvas */
+void draw_pixel(char canvas[HEIGHT][WIDTH], int x, int y) {
+    if (x >= 0 && x < WIDTH && y >= 0 && y < HEIGHT) {
+        canvas[y][x] = '*';
+    }
+}
+
+/* Bresenham's Line Algorithm */
+void draw_line(char canvas[HEIGHT][WIDTH], int x1, int y1, int x2, int y2) {
+    int dx = abs(x2 - x1);
+    int dy = abs(y2 - y1);
+    int sx = (x1 < x2) ? 1 : -1;
+    int sy = (y1 < y2) ? 1 : -1;
+    int err = dx - dy;
+
+    while (1) {
+        draw_pixel(canvas, x1, y1);
+        if (x1 == x2 && y1 == y2) {
+            break;
+        }
+        int e2 = 2 * err;
+        if (e2 > -dy) {
+            err -= dy;
+            x1 += sx;
+        }
+        if (e2 < dx) {
+            err += dx;
+            y1 += sy;
+        }
+    }
+}
+
+/* Draw a rectangle outline */
+void draw_rectangle(char canvas[HEIGHT][WIDTH], int x, int y, int w, int h) {
+    if (w <= 0 || h <= 0) return;
+    int i;
+    for (i = 0; i < w; i++) {
+        draw_pixel(canvas, x + i, y);
+        draw_pixel(canvas, x + i, y + h - 1);
+    }
+    for (i = 0; i < h; i++) {
+        draw_pixel(canvas, x, y + i);
+        draw_pixel(canvas, x + w - 1, y + i);
+    }
+}
+
+/* Midpoint Circle Algorithm */
+void draw_circle(char canvas[HEIGHT][WIDTH], int cx, int cy, int r) {
+    if (r < 0) return;
+    int x = 0;
+    int y = r;
+    int d = 3 - 2 * r;
+
+    draw_pixel(canvas, cx + x, cy + y);
+    draw_pixel(canvas, cx - x, cy + y);
+    draw_pixel(canvas, cx + x, cy - y);
+    draw_pixel(canvas, cx - x, cy - y);
+    draw_pixel(canvas, cx + y, cy + x);
+    draw_pixel(canvas, cx - y, cy + x);
+    draw_pixel(canvas, cx + y, cy - x);
+    draw_pixel(canvas, cx - y, cy - x);
+
+    while (y >= x) {
+        x++;
+        if (d > 0) {
+            y--;
+            d = d + 4 * (x - y) + 10;
+        } else {
+            d = d + 4 * x + 6;
+        }
+        draw_pixel(canvas, cx + x, cy + y);
+        draw_pixel(canvas, cx - x, cy + y);
+        draw_pixel(canvas, cx + x, cy - y);
+        draw_pixel(canvas, cx - x, cy - y);
+        draw_pixel(canvas, cx + y, cy + x);
+        draw_pixel(canvas, cx - y, cy + x);
+        draw_pixel(canvas, cx + y, cy - x);
+        draw_pixel(canvas, cx - y, cy - x);
+    }
+}
+
+/* Draw a triangle outline */
+void draw_triangle(char canvas[HEIGHT][WIDTH], int x1, int y1, int x2, int y2, int x3, int y3) {
+    draw_line(canvas, x1, y1, x2, y2);
+    draw_line(canvas, x2, y2, x3, y3);
+    draw_line(canvas, x3, y3, x1, y1);
+}
+
+/* Add a shape to the active list */
+int add_shape(Shape shapes[], int *count, Shape shape) {
+    if (*count >= MAX_SHAPES) {
+        return -1;
+    }
+    int max_id = 0;
+    for (int i = 0; i < *count; i++) {
+        if (shapes[i].id > max_id) {
+            max_id = shapes[i].id;
+        }
+    }
+    shape.id = max_id + 1;
+    shapes[*count] = shape;
+    (*count)++;
+    return shape.id;
+}
+
+/* Find shape index by ID */
+int find_shape_index(Shape shapes[], int count, int id) {
+    for (int i = 0; i < count; i++) {
+        if (shapes[i].id == id) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+/* Delete a shape from the list */
+int delete_shape(Shape shapes[], int *count, int id) {
+    int idx = find_shape_index(shapes, *count, id);
+    if (idx == -1) {
+        return 0;
+    }
+    for (int i = idx; i < *count - 1; i++) {
+        shapes[i] = shapes[i + 1];
+    }
+    (*count)--;
+    return 1;
+}
+
+/* Redraw all shapes on the canvas */
+void render_all_shapes(Shape shapes[], int count, char canvas[HEIGHT][WIDTH]) {
+    canvas_clear(canvas);
+    for (int i = 0; i < count; i++) {
+        switch (shapes[i].type) {
+            case SHAPE_LINE:
+                draw_line(canvas, 
+                          shapes[i].data.line.x1, shapes[i].data.line.y1,
+                          shapes[i].data.line.x2, shapes[i].data.line.y2);
+                break;
+            case SHAPE_RECTANGLE:
+                draw_rectangle(canvas, 
+                               shapes[i].data.rect.x, shapes[i].data.rect.y,
+                               shapes[i].data.rect.w, shapes[i].data.rect.h);
+                break;
+            case SHAPE_CIRCLE:
+                draw_circle(canvas, 
+                            shapes[i].data.circle.cx, shapes[i].data.circle.cy,
+                            shapes[i].data.circle.r);
+                break;
+            case SHAPE_TRIANGLE:
+                draw_triangle(canvas, 
+                              shapes[i].data.tri.x1, shapes[i].data.tri.y1,
+                              shapes[i].data.tri.x2, shapes[i].data.tri.y2,
+                              shapes[i].data.tri.x3, shapes[i].data.tri.y3);
+                break;
+        }
+    }
+}
+
+/* =========================================================================
+ * 3. FRONTEND: STANDARD CLI MENU SYSTEM
+ * ========================================================================= */
+
+#ifndef USE_NCURSES
+
+void clear_input() {
+    int c;
+    while ((c = getchar()) != '\n' && c != EOF);
+}
+
+void list_shapes(Shape shapes[], int count) {
+    if (count == 0) {
+        printf("\nNo active shapes in the picture.\n");
+        return;
+    }
+    printf("\n--- Active Shapes ---\n");
+    for (int i = 0; i < count; i++) {
+        printf("ID: %d | ", shapes[i].id);
+        switch (shapes[i].type) {
+            case SHAPE_LINE:
+                printf("Line: (%d, %d) to (%d, %d)\n",
+                       shapes[i].data.line.x1, shapes[i].data.line.y1,
+                       shapes[i].data.line.x2, shapes[i].data.line.y2);
+                break;
+            case SHAPE_RECTANGLE:
+                printf("Rectangle: Top-Left (%d, %d), Width: %d, Height: %d\n",
+                       shapes[i].data.rect.x, shapes[i].data.rect.y,
+                       shapes[i].data.rect.w, shapes[i].data.rect.h);
+                break;
+            case SHAPE_CIRCLE:
+                printf("Circle: Center (%d, %d), Radius: %d\n",
+                       shapes[i].data.circle.cx, shapes[i].data.circle.cy,
+                       shapes[i].data.circle.r);
+                break;
+            case SHAPE_TRIANGLE:
+                printf("Triangle: Vertices (%d, %d), (%d, %d), (%d, %d)\n",
+                       shapes[i].data.tri.x1, shapes[i].data.tri.y1,
+                       shapes[i].data.tri.x2, shapes[i].data.tri.y2,
+                       shapes[i].data.tri.x3, shapes[i].data.tri.y3);
+                break;
+        }
+    }
+    printf("---------------------\n");
+}
+
+int get_int(const char *prompt, int min, int max) {
+    int val;
+    while (1) {
+        printf("%s", prompt);
+        if (scanf("%d", &val) == 1) {
+            if (val >= min && val <= max) {
+                return val;
+            }
+            printf("Error: Value must be between %d and %d.\n", min, max);
+        } else {
+            printf("Error: Invalid input.\n");
+            clear_input();
+        }
+    }
+}
+
+Shape prompt_shape(int type) {
+    Shape s;
+    s.type = (ShapeType)type;
+    s.id = 0;
+
+    printf("\nCanvas size: %dx%d (0-indexed indices)\n", WIDTH, HEIGHT);
+    switch (s.type) {
+        case SHAPE_LINE:
+            printf("--- Enter Line Coordinates ---\n");
+            s.data.line.x1 = get_int("Enter X1 (0 to Width-1): ", 0, WIDTH - 1);
+            s.data.line.y1 = get_int("Enter Y1 (0 to Height-1): ", 0, HEIGHT - 1);
+            s.data.line.x2 = get_int("Enter X2 (0 to Width-1): ", 0, WIDTH - 1);
+            s.data.line.y2 = get_int("Enter Y2 (0 to Height-1): ", 0, HEIGHT - 1);
+            break;
+        case SHAPE_RECTANGLE:
+            printf("--- Enter Rectangle Details ---\n");
+            s.data.rect.x = get_int("Enter Top-Left X (0 to Width-1): ", 0, WIDTH - 1);
+            s.data.rect.y = get_int("Enter Top-Left Y (0 to Height-1): ", 0, HEIGHT - 1);
+            s.data.rect.w = get_int("Enter Width (1 to Width): ", 1, WIDTH);
+            s.data.rect.h = get_int("Enter Height (1 to Height): ", 1, HEIGHT);
+            break;
+        case SHAPE_CIRCLE:
+            printf("--- Enter Circle Details ---\n");
+            s.data.circle.cx = get_int("Enter Center X (0 to Width-1): ", 0, WIDTH - 1);
+            s.data.circle.cy = get_int("Enter Center Y (0 to Height-1): ", 0, HEIGHT - 1);
+            s.data.circle.r = get_int("Enter Radius (0 to Max): ", 0, WIDTH);
+            break;
+        case SHAPE_TRIANGLE:
+            printf("--- Enter Triangle Coordinates ---\n");
+            s.data.tri.x1 = get_int("Enter X1 (0 to Width-1): ", 0, WIDTH - 1);
+            s.data.tri.y1 = get_int("Enter Y1 (0 to Height-1): ", 0, HEIGHT - 1);
+            s.data.tri.x2 = get_int("Enter X2 (0 to Width-1): ", 0, WIDTH - 1);
+            s.data.tri.y2 = get_int("Enter Y2 (0 to Height-1): ", 0, HEIGHT - 1);
+            s.data.tri.x3 = get_int("Enter X3 (0 to Width-1): ", 0, WIDTH - 1);
+            s.data.tri.y3 = get_int("Enter Y3 (0 to Height-1): ", 0, HEIGHT - 1);
+            break;
+    }
+    return s;
+}
+
+int main_cli() {
+    char canvas[HEIGHT][WIDTH];
+    Shape shapes[MAX_SHAPES];
+    int shape_count = 0;
+    int choice;
+
+    canvas_clear(canvas);
+
+    while (1) {
+        printf("\n====================================\n");
+        printf("         2D Graphics Editor         \n");
+        printf("====================================\n");
+        printf("1. Add a shape\n");
+        printf("2. Delete a shape\n");
+        printf("3. Modify a shape\n");
+        printf("4. Display canvas\n");
+        printf("5. List active shapes\n");
+        printf("6. Exit\n");
+        printf("------------------------------------\n");
+        
+        choice = get_int("Enter your choice (1-6): ", 1, 6);
+
+        if (choice == 6) {
+            printf("\nExiting. Thank you!\n");
+            break;
+        }
+
+        switch (choice) {
+            case 1: {
+                printf("\nSelect Shape Type:\n");
+                printf("1. Line\n");
+                printf("2. Rectangle\n");
+                printf("3. Circle\n");
+                printf("4. Triangle\n");
+                int type_choice = get_int("Enter shape type (1-4): ", 1, 4);
+                
+                Shape s = prompt_shape(type_choice - 1);
+                int new_id = add_shape(shapes, &shape_count, s);
+                if (new_id != -1) {
+                    printf("\nSuccessfully added shape ID: %d\n", new_id);
+                    render_all_shapes(shapes, shape_count, canvas);
+                } else {
+                    printf("\nError: Shape list is full!\n");
+                }
+                break;
+            }
+            case 2: {
+                list_shapes(shapes, shape_count);
+                if (shape_count > 0) {
+                    int delete_id = get_int("Enter ID to delete: ", 1, 10000);
+                    if (delete_shape(shapes, &shape_count, delete_id)) {
+                        printf("\nShape ID %d deleted.\n", delete_id);
+                        render_all_shapes(shapes, shape_count, canvas);
+                    } else {
+                        printf("\nError: Shape ID %d not found.\n", delete_id);
+                    }
+                }
+                break;
+            }
+            case 3: {
+                list_shapes(shapes, shape_count);
+                if (shape_count > 0) {
+                    int modify_id = get_int("Enter ID to modify: ", 1, 10000);
+                    int idx = find_shape_index(shapes, shape_count, modify_id);
+                    if (idx != -1) {
+                        Shape s = prompt_shape(shapes[idx].type);
+                        s.id = modify_id;
+                        shapes[idx] = s;
+                        printf("\nShape ID %d modified.\n", modify_id);
+                        render_all_shapes(shapes, shape_count, canvas);
+                    } else {
+                        printf("\nError: Shape ID %d not found.\n", modify_id);
+                    }
+                }
+                break;
+            }
+            case 4:
+                render_all_shapes(shapes, shape_count, canvas);
+                printf("\n--- Drawing Canvas ---\n");
+                canvas_display(canvas);
+                printf("----------------------\n");
+                break;
+            case 5:
+                list_shapes(shapes, shape_count);
+                break;
+        }
+    }
+    return 0;
+}
+
+#endif /* USE_NCURSES */
+
+/* =========================================================================
+ * 4. FRONTEND: NCURSES SPLIT-SCREEN UI
+ * ========================================================================= */
+
+#ifdef USE_NCURSES
+
+#include <ncurses.h>
+
+#define PAIR_BORDER  1
+#define PAIR_SHAPE   2
+#define PAIR_TEXT    3
+#define PAIR_ERROR   4
+#define PAIR_CANVAS  5
+
+#define MIN_LINES 26
+#define MIN_COLS  95
+
+void draw_ui(WINDOW *win_canvas, WINDOW *win_sidebar, WINDOW *win_status, Shape shapes[], int count, char canvas[HEIGHT][WIDTH]) {
+    werase(win_canvas);
+    wattron(win_canvas, COLOR_PAIR(PAIR_BORDER));
+    box(win_canvas, 0, 0);
+    mvwprintw(win_canvas, 0, 2, " Canvas (Grid: %dx%d) ", WIDTH, HEIGHT);
+    wattroff(win_canvas, COLOR_PAIR(PAIR_BORDER));
+
+    for (int y = 0; y < HEIGHT; y++) {
+        for (int x = 0; x < WIDTH; x++) {
+            if (canvas[y][x] == '*') {
+                wattron(win_canvas, COLOR_PAIR(PAIR_SHAPE) | A_BOLD);
+                mvwaddch(win_canvas, y + 1, x + 1, '*');
+                wattroff(win_canvas, COLOR_PAIR(PAIR_SHAPE) | A_BOLD);
+            } else {
+                wattron(win_canvas, COLOR_PAIR(PAIR_CANVAS));
+                mvwaddch(win_canvas, y + 1, x + 1, '_');
+                wattroff(win_canvas, COLOR_PAIR(PAIR_CANVAS));
+            }
+        }
+    }
+    wrefresh(win_canvas);
+
+    werase(win_sidebar);
+    wattron(win_sidebar, COLOR_PAIR(PAIR_BORDER));
+    box(win_sidebar, 0, 0);
+    mvwprintw(win_sidebar, 0, 2, " Shape Manager ");
+    wattroff(win_sidebar, COLOR_PAIR(PAIR_BORDER));
+
+    wattron(win_sidebar, COLOR_PAIR(PAIR_TEXT) | A_UNDERLINE);
+    mvwprintw(win_sidebar, 1, 2, "Active Shapes:");
+    wattroff(win_sidebar, COLOR_PAIR(PAIR_TEXT) | A_UNDERLINE);
+
+    int start_y = 2;
+    int max_display = LINES - 12;
+    for (int i = 0; i < count && i < max_display; i++) {
+        wattron(win_sidebar, COLOR_PAIR(PAIR_TEXT));
+        mvwprintw(win_sidebar, start_y + i, 2, "ID %2d:", shapes[i].id);
+        switch (shapes[i].type) {
+            case SHAPE_LINE:
+                mvwprintw(win_sidebar, start_y + i, 9, "Line (%d,%d)-(%d,%d)", 
+                          shapes[i].data.line.x1, shapes[i].data.line.y1,
+                          shapes[i].data.line.x2, shapes[i].data.line.y2);
+                break;
+            case SHAPE_RECTANGLE:
+                mvwprintw(win_sidebar, start_y + i, 9, "Rect (%d,%d) w:%d h:%d", 
+                          shapes[i].data.rect.x, shapes[i].data.rect.y,
+                          shapes[i].data.rect.w, shapes[i].data.rect.h);
+                break;
+            case SHAPE_CIRCLE:
+                mvwprintw(win_sidebar, start_y + i, 9, "Circ C(%d,%d) r:%d", 
+                          shapes[i].data.circle.cx, shapes[i].data.circle.cy,
+                          shapes[i].data.circle.r);
+                break;
+            case SHAPE_TRIANGLE:
+                mvwprintw(win_sidebar, start_y + i, 9, "Tri (%d,%d)..(%d,%d)", 
+                          shapes[i].data.tri.x1, shapes[i].data.tri.y1,
+                          shapes[i].data.tri.x2, shapes[i].data.tri.y2);
+                break;
+        }
+        wattroff(win_sidebar, COLOR_PAIR(PAIR_TEXT));
+    }
+    
+    if (count > max_display) {
+        mvwprintw(win_sidebar, start_y + max_display, 2, "... %d more", count - max_display);
+    }
+
+    int help_y = LINES - 9;
+    wattron(win_sidebar, COLOR_PAIR(PAIR_BORDER));
+    mvwhline(win_sidebar, help_y, 1, ACS_HLINE, COLS - WIDTH - 7);
+    wattroff(win_sidebar, COLOR_PAIR(PAIR_BORDER));
+    
+    wattron(win_sidebar, COLOR_PAIR(PAIR_TEXT) | A_BOLD);
+    mvwprintw(win_sidebar, help_y + 1, 2, "Keyboard Controls:");
+    wattroff(win_sidebar, COLOR_PAIR(PAIR_TEXT) | A_BOLD);
+    
+    mvwprintw(win_sidebar, help_y + 2, 2, "[A] Add a Shape");
+    mvwprintw(win_sidebar, help_y + 3, 2, "[D] Delete a Shape");
+    mvwprintw(win_sidebar, help_y + 4, 2, "[M] Modify a Shape");
+    mvwprintw(win_sidebar, help_y + 5, 2, "[Q] Quit Editor");
+
+    wrefresh(win_sidebar);
+
+    werase(win_status);
+    wattron(win_status, COLOR_PAIR(PAIR_BORDER));
+    box(win_status, 0, 0);
+    mvwprintw(win_status, 0, 2, " Status / Input ");
+    wattroff(win_status, COLOR_PAIR(PAIR_BORDER));
+    mvwprintw(win_status, 1, 2, "Ready. Press [A], [D], [M], or [Q].");
+    wrefresh(win_status);
+}
+
+int get_ncurses_int(WINDOW *win_status, const char *prompt, int min, int max) {
+    char input_buf[64];
+    int val;
+    while (1) {
+        werase(win_status);
+        wattron(win_status, COLOR_PAIR(PAIR_BORDER));
+        box(win_status, 0, 0);
+        mvwprintw(win_status, 0, 2, " Input Required ");
+        wattroff(win_status, COLOR_PAIR(PAIR_BORDER));
+        mvwprintw(win_status, 1, 2, "%s [%d to %d]: ", prompt, min, max);
+        wrefresh(win_status);
+        
+        echo();
+        curs_set(1);
+        wgetnstr(win_status, input_buf, sizeof(input_buf) - 1);
+        noecho();
+        curs_set(0);
+        
+        if (sscanf(input_buf, "%d", &val) == 1) {
+            if (val >= min && val <= max) {
+                return val;
+            }
+        }
+        
+        werase(win_status);
+        wattron(win_status, COLOR_PAIR(PAIR_BORDER));
+        box(win_status, 0, 0);
+        wattroff(win_status, COLOR_PAIR(PAIR_BORDER));
+        wattron(win_status, COLOR_PAIR(PAIR_ERROR) | A_BOLD);
+        mvwprintw(win_status, 1, 2, "Error: Invalid entry! Press any key...");
+        wattroff(win_status, COLOR_PAIR(PAIR_ERROR) | A_BOLD);
+        wrefresh(win_status);
+        wgetch(win_status);
+    }
+}
+
+void add_shape_flow(WINDOW *win_status, Shape shapes[], int *count, char canvas[HEIGHT][WIDTH]) {
+    werase(win_status);
+    wattron(win_status, COLOR_PAIR(PAIR_BORDER));
+    box(win_status, 0, 0);
+    mvwprintw(win_status, 0, 2, " Choose Shape ");
+    wattroff(win_status, COLOR_PAIR(PAIR_BORDER));
+    mvwprintw(win_status, 1, 2, "[1] Line | [2] Rect | [3] Circle | [4] Triangle | [Other] Cancel");
+    wrefresh(win_status);
+    
+    int ch = wgetch(win_status);
+    int type = -1;
+    if (ch == '1') type = SHAPE_LINE;
+    else if (ch == '2') type = SHAPE_RECTANGLE;
+    else if (ch == '3') type = SHAPE_CIRCLE;
+    else if (ch == '4') type = SHAPE_TRIANGLE;
+    
+    if (type == -1) return;
+
+    Shape s;
+    s.type = (ShapeType)type;
+    s.id = 0;
+
+    switch (s.type) {
+        case SHAPE_LINE:
+            s.data.line.x1 = get_ncurses_int(win_status, "Enter X1", 0, WIDTH - 1);
+            s.data.line.y1 = get_ncurses_int(win_status, "Enter Y1", 0, HEIGHT - 1);
+            s.data.line.x2 = get_ncurses_int(win_status, "Enter X2", 0, WIDTH - 1);
+            s.data.line.y2 = get_ncurses_int(win_status, "Enter Y2", 0, HEIGHT - 1);
+            break;
+        case SHAPE_RECTANGLE:
+            s.data.rect.x = get_ncurses_int(win_status, "Enter Top-Left X", 0, WIDTH - 1);
+            s.data.rect.y = get_ncurses_int(win_status, "Enter Top-Left Y", 0, HEIGHT - 1);
+            s.data.rect.w = get_ncurses_int(win_status, "Enter Width", 1, WIDTH);
+            s.data.rect.h = get_ncurses_int(win_status, "Enter Height", 1, HEIGHT);
+            break;
+        case SHAPE_CIRCLE:
+            s.data.circle.cx = get_ncurses_int(win_status, "Enter Center X", 0, WIDTH - 1);
+            s.data.circle.cy = get_ncurses_int(win_status, "Enter Center Y", 0, HEIGHT - 1);
+            s.data.circle.r = get_ncurses_int(win_status, "Enter Radius", 0, WIDTH);
+            break;
+        case SHAPE_TRIANGLE:
+            s.data.tri.x1 = get_ncurses_int(win_status, "Enter X1", 0, WIDTH - 1);
+            s.data.tri.y1 = get_ncurses_int(win_status, "Enter Y1", 0, HEIGHT - 1);
+            s.data.tri.x2 = get_ncurses_int(win_status, "Enter X2", 0, WIDTH - 1);
+            s.data.tri.y2 = get_ncurses_int(win_status, "Enter Y2", 0, HEIGHT - 1);
+            s.data.tri.x3 = get_ncurses_int(win_status, "Enter X3", 0, WIDTH - 1);
+            s.data.tri.y3 = get_ncurses_int(win_status, "Enter Y3", 0, HEIGHT - 1);
+            break;
+    }
+
+    int id = add_shape(shapes, count, s);
+    if (id != -1) {
+        render_all_shapes(shapes, *count, canvas);
+        werase(win_status);
+        box(win_status, 0, 0);
+        mvwprintw(win_status, 1, 2, "Successfully added Shape ID %d! Press any key...", id);
+        wrefresh(win_status);
+        wgetch(win_status);
+    } else {
+        werase(win_status);
+        box(win_status, 0, 0);
+        wattron(win_status, COLOR_PAIR(PAIR_ERROR));
+        mvwprintw(win_status, 1, 2, "Error: Shape list full! Press any key...");
+        wattroff(win_status, COLOR_PAIR(PAIR_ERROR));
+        wrefresh(win_status);
+        wgetch(win_status);
+    }
+}
+
+void delete_shape_flow(WINDOW *win_status, Shape shapes[], int *count, char canvas[HEIGHT][WIDTH]) {
+    if (*count == 0) {
+        werase(win_status);
+        box(win_status, 0, 0);
+        mvwprintw(win_status, 1, 2, "No shapes to delete! Press any key...");
+        wrefresh(win_status);
+        wgetch(win_status);
+        return;
+    }
+    int id = get_ncurses_int(win_status, "Enter Shape ID to delete", 1, 10000);
+    if (delete_shape(shapes, count, id)) {
+        render_all_shapes(shapes, *count, canvas);
+        werase(win_status);
+        box(win_status, 0, 0);
+        mvwprintw(win_status, 1, 2, "Shape ID %d deleted! Press any key...", id);
+        wrefresh(win_status);
+        wgetch(win_status);
+    } else {
+        werase(win_status);
+        box(win_status, 0, 0);
+        wattron(win_status, COLOR_PAIR(PAIR_ERROR));
+        mvwprintw(win_status, 1, 2, "Shape ID %d not found! Press any key...", id);
+        wattroff(win_status, COLOR_PAIR(PAIR_ERROR));
+        wrefresh(win_status);
+        wgetch(win_status);
+    }
+}
+
+void modify_shape_flow(WINDOW *win_status, Shape shapes[], int count, char canvas[HEIGHT][WIDTH]) {
+    if (count == 0) {
+        werase(win_status);
+        box(win_status, 0, 0);
+        mvwprintw(win_status, 1, 2, "No shapes to modify! Press any key...");
+        wrefresh(win_status);
+        wgetch(win_status);
+        return;
+    }
+    int id = get_ncurses_int(win_status, "Enter Shape ID to modify", 1, 10000);
+    int idx = find_shape_index(shapes, count, id);
+    if (idx == -1) {
+        werase(win_status);
+        box(win_status, 0, 0);
+        wattron(win_status, COLOR_PAIR(PAIR_ERROR));
+        mvwprintw(win_status, 1, 2, "Shape ID %d not found! Press any key...", id);
+        wattroff(win_status, COLOR_PAIR(PAIR_ERROR));
+        wrefresh(win_status);
+        wgetch(win_status);
+        return;
+    }
+
+    Shape s = shapes[idx];
+    switch (s.type) {
+        case SHAPE_LINE:
+            s.data.line.x1 = get_ncurses_int(win_status, "New X1", 0, WIDTH - 1);
+            s.data.line.y1 = get_ncurses_int(win_status, "New Y1", 0, HEIGHT - 1);
+            s.data.line.x2 = get_ncurses_int(win_status, "New X2", 0, WIDTH - 1);
+            s.data.line.y2 = get_ncurses_int(win_status, "New Y2", 0, HEIGHT - 1);
+            break;
+        case SHAPE_RECTANGLE:
+            s.data.rect.x = get_ncurses_int(win_status, "New Top-Left X", 0, WIDTH - 1);
+            s.data.rect.y = get_ncurses_int(win_status, "New Top-Left Y", 0, HEIGHT - 1);
+            s.data.rect.w = get_ncurses_int(win_status, "New Width", 1, WIDTH);
+            s.data.rect.h = get_ncurses_int(win_status, "New Height", 1, HEIGHT);
+            break;
+        case SHAPE_CIRCLE:
+            s.data.circle.cx = get_ncurses_int(win_status, "New Center X", 0, WIDTH - 1);
+            s.data.circle.cy = get_ncurses_int(win_status, "New Center Y", 0, HEIGHT - 1);
+            s.data.circle.r = get_ncurses_int(win_status, "New Radius", 0, WIDTH);
+            break;
+        case SHAPE_TRIANGLE:
+            s.data.tri.x1 = get_ncurses_int(win_status, "New X1", 0, WIDTH - 1);
+            s.data.tri.y1 = get_ncurses_int(win_status, "New Y1", 0, HEIGHT - 1);
+            s.data.tri.x2 = get_ncurses_int(win_status, "New X2", 0, WIDTH - 1);
+            s.data.tri.y2 = get_ncurses_int(win_status, "New Y2", 0, HEIGHT - 1);
+            s.data.tri.x3 = get_ncurses_int(win_status, "New X3", 0, WIDTH - 1);
+            s.data.tri.y3 = get_ncurses_int(win_status, "New Y3", 0, HEIGHT - 1);
+            break;
+    }
+    shapes[idx] = s;
+    render_all_shapes(shapes, count, canvas);
+    werase(win_status);
+    box(win_status, 0, 0);
+    mvwprintw(win_status, 1, 2, "Shape ID %d modified! Press any key...", id);
+    wrefresh(win_status);
+    wgetch(win_status);
+}
+
+int main_ncurses() {
+    char canvas[HEIGHT][WIDTH];
+    Shape shapes[MAX_SHAPES];
+    int shape_count = 0;
+
+    canvas_clear(canvas);
+
+    initscr();
+    cbreak();
+    noecho();
+    keypad(stdscr, TRUE);
+    curs_set(0);
+
+    if (has_colors()) {
+        start_color();
+        init_pair(PAIR_BORDER, COLOR_BLUE, COLOR_BLACK);
+        init_pair(PAIR_SHAPE,  COLOR_YELLOW, COLOR_BLACK);
+        init_pair(PAIR_TEXT,   COLOR_GREEN, COLOR_BLACK);
+        init_pair(PAIR_ERROR,  COLOR_RED, COLOR_BLACK);
+        init_pair(PAIR_CANVAS, COLOR_WHITE, COLOR_BLACK);
+    }
+
+    if (LINES < MIN_LINES || COLS < MIN_COLS) {
+        endwin();
+        fprintf(stderr, "Error: Terminal size is too small!\n");
+        fprintf(stderr, "Current size: %dx%d. Minimum required: %dx%d\n", COLS, LINES, MIN_COLS, MIN_LINES);
+        fprintf(stderr, "Please resize your terminal window and run again.\n");
+        return 1;
+    }
+
+    wattron(stdscr, COLOR_PAIR(PAIR_BORDER));
+    box(stdscr, 0, 0);
+    mvwprintw(stdscr, 0, (COLS - 30) / 2, " 2D Graphics Editor (ncurses) ");
+    wattroff(stdscr, COLOR_PAIR(PAIR_BORDER));
+    wrefresh(stdscr);
+
+    WINDOW *win_canvas  = newwin(HEIGHT + 2, WIDTH + 2, 1, 2);
+    WINDOW *win_sidebar = newwin(HEIGHT + 2, COLS - WIDTH - 7, 1, WIDTH + 5);
+    WINDOW *win_status  = newwin(3, COLS - 4, HEIGHT + 3, 2);
+
+    keypad(win_canvas, TRUE);
+    keypad(win_sidebar, TRUE);
+    keypad(win_status, TRUE);
+
+    int should_run = 1;
+    while (should_run) {
+        draw_ui(win_canvas, win_sidebar, win_status, shapes, shape_count, canvas);
+        int ch = getch();
+        switch (ch) {
+            case 'a':
+            case 'A':
+                add_shape_flow(win_status, shapes, &shape_count, canvas);
+                break;
+            case 'd':
+            case 'D':
+                delete_shape_flow(win_status, shapes, &shape_count, canvas);
+                break;
+            case 'm':
+            case 'M':
+                modify_shape_flow(win_status, shapes, shape_count, canvas);
+                break;
+            case 'q':
+            case 'Q':
+                should_run = 0;
+                break;
+            case KEY_RESIZE:
+                if (LINES < MIN_LINES || COLS < MIN_COLS) {
+                    werase(stdscr);
+                    mvwprintw(stdscr, LINES / 2, (COLS - 40) / 2, "Terminal too small! Please enlarge it.");
+                    wrefresh(stdscr);
+                } else {
+                    wresize(stdscr, LINES, COLS);
+                    box(stdscr, 0, 0);
+                    mvwprintw(stdscr, 0, (COLS - 30) / 2, " 2D Graphics Editor (ncurses) ");
+                    wrefresh(stdscr);
+                    
+                    wresize(win_canvas, HEIGHT + 2, WIDTH + 2);
+                    wresize(win_sidebar, HEIGHT + 2, COLS - WIDTH - 7);
+                    wresize(win_status, 3, COLS - 4);
+                }
+                break;
+        }
+    }
+
+    delwin(win_canvas);
+    delwin(win_sidebar);
+    delwin(win_status);
+    endwin();
+
+    printf("Thank you for using the 2D Graphics Editor!\n");
+    return 0;
+}
+
+#endif /* USE_NCURSES */
+
+/* =========================================================================
+ * 5. SYSTEM ENTRY POINT (main)
+ * ========================================================================= */
+
+int main(int argc, char *argv[]) {
+    (void)argc;
+    (void)argv;
+#ifdef USE_NCURSES
+    return main_ncurses();
+#else
+    return main_cli();
+#endif
+}
+```
